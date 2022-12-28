@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,53 +22,90 @@ void add_history(char* unused){}
 #include <editline/readline.h>
 #endif
 
-enum {
-  LERR_DIV_BY_ZERO,
-  LERR_BAD_OP,
-  LERR_BAD_NUM,
-};
+enum { LVAL_NUM, LVAL_ERR, LVAL_SYM, LVAL_SEXPR };
 
-enum { LVAL_NUM, LVAL_ERR };
-
-typedef struct {
+typedef struct lval {
   int type;
   long num;
-  int err;
+  char* err;
+  char* sym;
+  int count;
+  struct lval** cell;
 } lval_t;
 
-lval_t lval_num(long num) {
-  lval_t v;
-  v.type = LVAL_NUM;
-  v.num = num;
+lval_t* lval_num(long x) {
+  lval_t* v = malloc(sizeof(lval_t));
+  v->type = LVAL_NUM;
+  v->num = x;
   return v;
 }
 
-lval_t lval_err(int err) {
-  lval_t v;
-  v.type = LVAL_ERR;
-  v.err = err;
+lval_t* lval_err(char* m) {
+  lval_t* v = malloc(sizeof(lval_t));
+  v->type = LVAL_ERR;
+  v->err = malloc(strlen(m) + 1);
+  strcpy(v->err, m);
   return v;
 }
 
-void lval_num_print(lval_t t) {
-  printf("%li\n", t.num);
+lval_t* lval_sym(char* s) {
+  lval_t* v = malloc(sizeof(lval_t));
+  v->type = LVAL_SYM;
+  v->sym = malloc(strlen(s) + 1);
+  strcpy(v->sym, s);
+  return v;
 }
 
-void lval_err_print(lval_t t) {
-  switch(t.err){
-    case LERR_DIV_BY_ZERO:
-      puts("Error: Divide By Zero!");
+lval_t* lval_sexpr(void) {
+  lval_t* v = malloc(sizeof(lval_t));
+  v->type = LVAL_SEXPR;
+  v->count = 0;
+  v->cell = NULL;
+  return v;
+}
+
+void lval_del(lval_t* v) {
+  switch(v->type) {
+    case LVAL_NUM:
       break;
-    case LERR_BAD_OP:
-      puts("Error: Invalid Operator!");
+    case LVAL_ERR:
+      free(v->err);
       break;
-    case LERR_BAD_NUM:
-      puts("Error: Invalid Number!");
+    case LVAL_SYM:
+      free(v->sym);
       break;
+    case LVAL_SEXPR:
+      for (int i = 0; i < v->count; ++i) {
+        lval_del(v->cell[i]);
+      }
+      free(v->cell);
+      break;
+  }
+   free(v);
+}
+
+void lval_print(lval_t t) {
+  if (t.type == LVAL_NUM) {
+    printf("%li\n", t.num);
+  } else {
+    switch(t.err){
+      case LERR_DIV_BY_ZERO:
+        puts("Error: Divide By Zero!");
+        break;
+      case LERR_BAD_OP:
+        puts("Error: Invalid Operator!");
+        break;
+      case LERR_BAD_NUM:
+        puts("Error: Invalid Number!");
+        break;
+    }
   }
 }
 
 lval_t eval_op(lval_t x, char* op, lval_t y) {
+  if (x.type == LVAL_ERR) { return x; }
+  if (y.type == LVAL_ERR) { return y; }
+
   if(strcmp(op, "+") == 0) { return lval_num(x.num + y.num); }
   if(strcmp(op, "-") == 0) { return lval_num(x.num - y.num); }
   if(strcmp(op, "*") == 0) { return lval_num(x.num * y.num); }
@@ -80,7 +118,9 @@ lval_t eval_op(lval_t x, char* op, lval_t y) {
 lval_t eval(mpc_ast_t* t) {
   // Base Case
   if (strstr(t->tag, "number")) {
-    return lval_num(atoi(t->contents));
+    errno = 0;
+    long x = strtol(t->contents, NULL, 10);
+    return errno != ERANGE ? lval_num(x) : lval_err(LERR_BAD_NUM);
   }
 
   // Recursive Case
@@ -91,17 +131,17 @@ lval_t eval(mpc_ast_t* t) {
   int i = 3;
   while(strstr(t->children[i]->tag, "expr")) {
     x = eval_op(x, op, eval(t->children[i]));
-    if (x.type == LVAL_ERR) { return x; }
     ++i;
   }
 
-  return lval_num(x.num);
+  return x;
 }
 
 int main(void) {
   char* input;
   mpc_parser_t* Number = mpc_new("number");
-  mpc_parser_t* Operator = mpc_new("operator");
+  mpc_parser_t* Symbol = mpc_new("symbol");
+  mpc_parser_t* Sexpr = mpc_new("sexpr");
   mpc_parser_t* Expr = mpc_new("expr");
   mpc_parser_t* Flispy = mpc_new("flispy");
   mpc_result_t r;
@@ -109,11 +149,12 @@ int main(void) {
   mpca_lang(MPCA_LANG_DEFAULT,
       "\
         number : /-?[0-9]+/ ; \
-        operator : '+' | '-' | '*' | '/' | '%' | '^' ; \
-        expr : <number> | '(' <operator> <expr>+ ')' ;\
-        flispy: /^/ <operator> <expr>+ /$/;\
+        symbol : '+' | '-' | '*' | '/' | '%' | '^' ; \
+        sexpr : '(' <expr>* ')' ; \
+        expr : <number> | <symbol> | <sexpr> ;\
+        flispy: /^/ <expr>* /$/;\
       ",
-      Number, Operator, Expr, Flispy);
+      Number, Symbol, Sexpr, Expr, Flispy);
 
   puts("Flispy Version 0.0.0.1");
   puts("Press Ctrl+c to exit\n");
@@ -125,11 +166,7 @@ int main(void) {
     if(mpc_parse("<stdin>", input, Flispy, &r)) {
       // mpc_ast_print(r.output);
       lval_t result = eval(r.output);
-      if (result.type == LVAL_NUM) {
-        lval_num_print(result);
-      } else {
-        lval_err_print(result);
-      }
+      lval_print(result);
       mpc_ast_delete(r.output);
     } else {
       mpc_err_print(r.error);
@@ -138,6 +175,6 @@ int main(void) {
 
   }
     free(input);
-    mpc_cleanup(4, Number, Operator, Expr, Flispy);
+    mpc_cleanup(5, Number, Symbol, Sexpr, Expr, Flispy);
     return 0;
 }
