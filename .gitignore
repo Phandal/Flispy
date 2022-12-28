@@ -1,0 +1,5 @@
+**/*.o
+flispy
+.DS_STORE
+.cache/*
+compile_commands.json
